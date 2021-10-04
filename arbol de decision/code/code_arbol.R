@@ -3,14 +3,14 @@ library(dplyr)
 library(rpart)
 library(rpart.plot)
 
-casen_mod <- read_csv("data/casen_mod.csv")
+casen_mod <- read_csv("arbol de decision/data/casen_mod.csv")
 
 casen_mod$ing_nivel=as.factor(casen_mod$ing_nivel)
 casen_mod$sexo=as.factor(casen_mod$sexo)
 
 casen_mod <- casen_mod %>%
   mutate(ing_baj = as.factor(if_else(ingreso <= 4*10^5, 0, 1)),
-         ing_alt = as.factor(if_else(ingreso >= 1*10^6, 0, 1)))
+         ing_alt = as.factor(if_else(ingreso >= 10^6, 0, 1)))
 
 
 arbol_casen=rpart(ing_nivel~esc,casen_mod,parms=list(split = "information"))
