@@ -1,0 +1,63 @@
+---
+title: <center> IX Región`:` Clasificación de personas con Ingresos Bajos y Altos </center>
+author: "Ariel Fuentes"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: TRUE
+    number_sections: FALSE
+    toc_float: FALSE 
+      # collapsed: false
+      # smooth_scroll: false
+    css: "../code/style.css"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+```
+
+```{r, echo=FALSE}
+htmltools::img(src = knitr::image_uri(file.path("../data/logo_geo_0.png")
+                                      ),
+               alt = 'logo',
+               style = 'position:absolute; top:0; right:0; padding:1px;',
+               width = "110px",
+               heigth = "110px")
+```
+
+## 1. Enunciado
+
+A través de un procesamiento de la Base de Datos *Casen 2017*, se construirá y compararán árboles de decisión para la región de *La Araucanía*.
+
+Se utilizan como variables independientes edad, sexo, escolaridad y nacionalidad.
+
+## 2. Tratamiento de los datos
+
+````{r}
+casen_mod <- read_csv("../data/casen_mod.csv") %>%
+  filter(region == 9) %>%
+  mutate(ing_nivel = as.factor(ing_nivel),
+         sexo = as.factor(sexo),
+         ing_baj = as.factor(if_else(ingreso <= 4*10^5, 1, 0)),
+         ing_alt = as.factor(if_else(ingreso >= 10^6, 1, 0)),
+         nac = as.factor(nac),
+         prof = as.factor(prof))
+
+````
+
+
+## 3. Definición de variables
+
+
+
+
+## 4. Formulación del Modelo
+
+
+
+
+## 5. Análisis de resultados
