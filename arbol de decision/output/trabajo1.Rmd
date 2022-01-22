@@ -18,6 +18,10 @@ library(readr)
 library(dplyr)
 library(rpart)
 library(rpart.plot)
+library(kableExtra)
+library(ggplot2)
+library(tibble)
+library(broom)
 ```
 
 ```{r, echo=FALSE}
@@ -41,6 +45,7 @@ Realizaremos la lectura de los datos y transformaremos las variables antes menci
 
 ````{r}
 casen_mod <- read_csv("../data/casen_mod.csv") %>%
+  rename(X1 = "...1", region = "region...3", region_1 = "region...9") %>%
   filter(region == 9) %>%
   select(-c("X1", "edu", "region_1", "prof", "ing_nivel")) %>%
   mutate(nac = as.factor(nac),
