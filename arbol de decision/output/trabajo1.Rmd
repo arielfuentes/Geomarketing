@@ -29,35 +29,456 @@ htmltools::img(src = knitr::image_uri(file.path("../data/logo_geo_0.png")
                heigth = "110px")
 ```
 
-## 1. Enunciado
-
-A través de un procesamiento de la Base de Datos *Casen 2017*, se construirá y compararán árboles de decisión para la región de *La Araucanía*.
+A través de un procesamiento de la Base de Datos Casen 2017, se construirá y compararán árboles de decisión para la región de La Araucanía.
 
 Se utilizan como variables independientes edad, sexo, escolaridad y nacionalidad.
 
-## 2. Tratamiento de los datos
+# 1. Explicación del criterio para crear sus variables dependientes
+
+Realizaremos la lectura de los datos y transformaremos las variables antes mencionadas en categóricas.
+
+## a) Lectura de Datos
 
 ````{r}
 casen_mod <- read_csv("../data/casen_mod.csv") %>%
   filter(region == 9) %>%
-  mutate(ing_nivel = as.factor(ing_nivel),
+  select(-c("X1", "edu", "region_1", "prof", "ing_nivel")) %>%
+  mutate(nac = as.factor(nac),
          sexo = as.factor(sexo),
-         ing_baj = as.factor(if_else(ingreso <= 4*10^5, 1, 0)),
-         ing_alt = as.factor(if_else(ingreso >= 10^6, 1, 0)),
-         nac = as.factor(nac),
-         prof = as.factor(prof))
+         region = as.factor(region),
+         nac_cat = case_when(nac == 1 ~ "Chilena",
+                             nac == 2 ~ "Chilena y otra",
+                             nac == 3 ~ "Otra nacionalidad"),
+         sexo_cat = case_when(sexo == 1 ~ "Hombre",
+                              sexo == 2 ~ "Mujer")
+         )
 
+kable(casen_mod, 
+      format.args = list(big.mark = ",")
+      ) %>%
+  kable_paper() %>%
+  scroll_box(height = "400px")
 ````
 
+## b) Limpieza de datos
 
-## 3. Definición de variables
+Se analiza la dispersión de datos de ingresos y sus valores atípicos
 
+````{r}
+ggplot(casen_mod, aes(region, ingreso, fill = region)) +
+  geom_boxplot(width = .3, fill = "white") +
+  theme_minimal() +
+  ggtitle("Dispersión de Ingresos en la Araucanía") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab("Ingresos per cápita")
+````
 
+De la gráfica anterior se observan 7 valores atípicos de ingresos altos distantes entre sí, que salen del objetivo de la modelación; por lo que no serán considerados. A estos los llamaremos super ricos. Por ello utilizaremos los ingresos menores a 2E8.
 
+Ahora la dispersión de los datos resulta ser la siguiente:
 
-## 4. Formulación del Modelo
+````{r}
+casen_mod <- filter(casen_mod, ingreso < 2E6)
+ggplot(casen_mod, aes(region, ingreso, fill = region)) +
+  geom_violin() +
+  scale_y_continuous(breaks = seq(0, max(casen_mod$ingreso), by = 100000), limits=c(0, max(casen_mod$ingreso))) +
+  geom_boxplot(width = .3, fill = "white") +
+  theme_minimal() +
+  ggtitle("Dispersión de Ingresos en la Araucanía") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab("Ingresos per cápita")
+````
 
+Por otro lado, del gráfico anterior observamos una anomalía en los datos inferiores, donde hay una elevada concentración de valores cercanos a 0. Para ello, consideraremos como referencia mínima, la cifra de la línea de la extrema pobreza (Lpe) del observatorio del Ministerio de Desarrollo Social, según el informe de Junio de 2018 (http://observatorio.ministeriodesarrollosocial.gob.cl/nueva-serie-cba-2018), cuya cifra asciende a 106.799, quedando ahora una estructura de los ingresos más razonables y aptos para ser modelados.
 
+````{r}
+casen_mod <- filter(casen_mod, ingreso > 106799)
+ggplot(casen_mod, aes(region, ingreso, fill = region)) +
+  geom_violin() +
+  geom_boxplot(width = .3, fill = "white", alpha = .5) +
+  theme_minimal() +
+  ggtitle("Dispersión de Ingresos en la Araucanía") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab("Ingresos per cápita")
+````
 
+## c) Creación de variables dependientes
 
-## 5. Análisis de resultados
+Se definen las variables a modelar, estas son Ingresos Bajos e Ingresos Altos, para ellos consideraremos aquellos datos que se alejen al menos 10 puntos porcentuales del promedio, que será mediante el cálculo de los percentiles 40% y 60% respectivamente.
+
+````{r}
+casen_mod <- mutate(casen_mod,
+                    ing_baj = as.factor(if_else(ingreso <= quantile(ingreso, probs = .4), 1, 0)),
+                    ing_alt = as.factor(if_else(ingreso >= quantile(ingreso, probs = .6), 1, 0)))
+````
+
+La proporción de datos a utilizar por cada nueva variable, es la siguiente
+
+````{r}
+casen_mod %>% 
+summarise(ing_baj = paste0(as.character(round(sum(as.numeric(ing_baj)-1)/nrow(.)*100, 2)), "%"), 
+ing_alt = paste0(as.character(round(sum(as.numeric(ing_alt)-1)/nrow(.)*100, 2)), "%")) %>%
+kable() %>%
+  kable_paper(full_width = F)
+````
+
+# 2. Explicación detallada de los métodos de selección de sus modelos de árbol de decisión
+
+## a) Generar datos de muestra y validación
+
+````{r}
+set.seed(123)
+#create index to sample
+index <- sample(1:nrow(casen_mod), (2/3)*length(1:nrow(casen_mod)))
+#create training sample
+training <- casen_mod[index,] 
+#create testing sample
+testing <- casen_mod[-index,] 
+````
+
+## b) Evaluación
+
+Para evaluar los modelos de árbol, se crea una función que se ejecutará para los distintos escenarios:
+
+````{r}
+tree <- function(data, eq, split){
+  library(rpart)
+  library(rpart.plot)
+  mod <- rpart(eq, 
+               data = data, 
+               parms = list(split = split))
+  plot <- rpart.plot(mod, 
+                     type=5, 
+                     extra=106, 
+                     main = paste("árbol:",
+                                  eq,
+                                  "\n",
+                                  split
+                     )
+  )
+  
+  return(mod)
+} 
+
+#fitting model
+##ingreso alto
+eqs.ing_alt <- list(c("ing_alt ~ edad",
+              "ing_alt ~ edad + sexo",
+              "ing_alt ~ edad + sexo + nac",
+              "ing_alt ~ edad + sexo + nac + esc"))
+#training ingresos altos
+trn.alt <- lapply(X = 1:4, function(x) lapply(X = c("information", "gini"), function(y) tree(data = training, eq = eqs.ing_alt[[1]][x], 
+                                 split = y)))
+````
+
+````{r}
+trn.alt
+````
+
+````{r}
+##ingreso bajo
+eqs.ing_baj <- list(c("ing_baj ~ edad",
+              "ing_baj ~ edad + sexo",
+              "ing_baj ~ edad + sexo + nac",
+              "ing_baj ~ edad + sexo + nac + esc"))
+
+#training ingresos bajos
+trn.baj <- lapply(X = 1:4, function(x) lapply(X = c("information", "gini"), function(y) tree(data = training, eq = eqs.ing_baj[[1]][x], 
+                                 split = y)))
+````
+
+````{r}
+trn.baj
+````
+
+## c) Elección de Mejor Modelo
+
+Para elegir el mejor modelo, tanto para los ingresos bajos como ingresos altos. Para ello, se utilizarán los árboles con todas las variables independientes. Para evaluar, se creará y aplicará una función.
+
+````{r}
+m.ing_alt <- tibble(test_sample.alt = testing$ing_alt,
+                    inf.alt = predict(trn.alt[[4]][[1]], testing, type = "class"),
+                    gini.alt = predict(trn.alt[[4]][[2]], testing, type = "class")) %>%
+  mutate_all(funs(as.numeric(.)-1))
+
+m.ing_baj <- tibble(test_sample.baj = testing$ing_baj,
+                    inf.baj = predict(trn.baj[[4]][[1]], testing, type = "class"),
+                    gini.baj = predict(trn.baj[[4]][[2]], testing, type = "class")) %>%
+  mutate_all(funs(as.numeric(.)-1))
+
+m.choice <- function(df, idx){
+  df %>%
+    select(c(1,idx)) %>%
+    mutate(dif = (.[[1]] - .[[2]])^2, n_ = n()) %>%
+    summarise(err = sum(dif)/mean(n_))
+}
+````
+
+Para el modelo de Ingresos Altos:
+
+````{r}
+if((m.choice(m.ing_alt, 2) - m.choice(m.ing_alt, 3)) == 0){
+  print(paste("Gini:", m.choice(m.ing_alt, 2)))
+  print(paste("Entropía:", m.choice(m.ing_alt, 3)))
+  print("Ambos modelos son de igual precisión")
+} else  if ((m.choice(m.ing_alt, 2) - m.choice(m.ing_alt, 3)) > 0){
+  print(paste("Gini:", m.choice(m.ing_alt, 2)))
+  print(paste("Entropía:", m.choice(m.ing_alt, 3)))
+  print("El mejor modelo es de entropía")
+} else {
+  print(paste("Gini:", m.choice(m.ing_alt, 2)))
+  print(paste("Entropía:", m.choice(m.ing_alt, 3)))
+  print("El mejor modelo es gini")
+}
+````
+
+Para el modelo de Ingresos Bajos:
+
+````{r}
+if((m.choice(m.ing_baj, 2) - m.choice(m.ing_baj, 3)) == 0){
+  print(paste("Gini:", m.choice(m.ing_baj, 2)))
+  print(paste("Entropía:", m.choice(m.ing_baj, 3)))
+  print("Ambos modelos son de igual precisión")
+} else  if ((m.choice(m.ing_baj, 2) - m.choice(m.ing_baj, 3)) > 0){
+  print(paste("Gini:", m.choice(m.ing_baj, 2)))
+  print(paste("Entropía:", m.choice(m.ing_baj, 3)))
+  print("El mejor modelo es de entropía")
+} else {
+  print(paste("Gini:", m.choice(m.ing_baj, 2)))
+  print(paste("Entropía:", m.choice(m.ing_baj, 3)))
+  print("El mejor modelo es gini")
+}
+````
+
+# 3. Explicación de cuál es la diferencia entre el criterio de la entropía y el criterio del índice de Gini ¿Llegó a resultados distintos? ¿por qué?
+
+Como se señala en Gareth James and Tibshirani (2021)
+
+El índice de Gini está definido como:
+
+$G=∑k=1Kp^mk(1−p^mk)$
+
+En cambio entropía se define como:
+
+$D=−∑k=1Kp^mklogp^mk)$
+
+Donde:
+
+$p^mk: es\ la\ proporción\ de\ las\ observaciones\ de\ entrenamiento\ de\ la\ k-ésima\ clase.$
+
+Si bien, estos índices tienen una formulación distinta, numéricamente llegan a resultados similares (valores entre 0 y 1). Y esto mismo fue lo que sucedió en el presente trabajo.
+
+Ambos índices son utilizados para evaluar la calidad de las divisiones del árbol y por tanto, la pureza de los nodos. Mientras más puro sea un nodo, es decir, que sea predominantemente de una clase, el índice será más cercano a 0. Consecuentemente, es totalmente razonable, que ambos índices entreguen resultados similares.
+
+# 4. Análisis de sus resultados.
+
+De los árboles de decisión generados, se verifica que modelar los ingresos altos resulta más complejo que los ingresos bajos, al menos en el orden en el que se van ingresando las variables. Los ingresos altos, requieren el uso de las variables escolaridad y edad para explicar su comportamiento. En cambio los ingresos bajos puede armar una estructura de árbol tan solo con la variable edad. Se observa también que ningún árbol tomó como significativa la variable nacionalidad, esto se debe a su baja variabilidad, el 99% de las personas corresponde exclusivamente a nacionalidad exclusivamente chilena:
+
+````{r}
+nac_grp <- casen_mod %>%
+  group_by(nac_cat) %>%
+  summarise(Cantidad = n()) %>%
+  mutate(`%` = paste0(round(Cantidad/sum(Cantidad)*100, 2), "%")) 
+nac_grp %>%
+  kable() %>%
+  kable_paper(full_width = F)
+````
+
+````{r}
+ggplot(nac_grp, aes(x = nac_cat, y = Cantidad)) +
+  geom_bar(stat = "identity") +
+  xlab("Categoría de Nacionalidad") 
+````
+
+En el caso de los ingresos altos, tampoco fue necesario el uso de la variable sexo, sin embargo, no es tan clara la razón de por qué esto ocurre, dado que la proporción de hombres es de tan solo 63%.
+
+````{r}
+#Ingresos Altos
+sex_cat.alt <- filter(casen_mod, ing_alt == 1) %>% 
+  group_by(sexo_cat) %>% 
+  summarise(Cantidad = n())  %>%
+  mutate(`%` = paste0(round(Cantidad/sum(Cantidad)*100, 2), "%")) 
+sex_cat.alt %>%
+  kable() %>%
+  kable_paper(full_width = F)
+````
+
+````{r}
+#Ingresos Bajos
+sex_cat.baj <- filter(casen_mod, ing_baj == 1) %>% 
+  group_by(sexo_cat) %>% 
+  summarise(Cantidad = n())  %>%
+  mutate(`%` = paste0(round(Cantidad/sum(Cantidad)*100, 2), "%")) 
+sex_cat.baj %>%
+  kable() %>%
+  kable_paper(full_width = F)
+````
+
+````{r}
+ggplot(sex_cat.alt, aes(x = sexo_cat, y = Cantidad)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Sexo en Ingresos Altos") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Categoría de Nacionalidad")
+````
+
+````{r}
+ggplot(sex_cat.baj, aes(x = sexo_cat, y = Cantidad)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Sexo en Ingresos Bajos") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Categoría de Nacionalidad")
+````
+
+En conclusión, lo que nos entregan estos modelos es que:
+
+## a) Los ingresos altos están dados por:
+
+- Escolaridad >= 16
+- Cuando la la escolaridad, se debe ser >= 25 años
+
+## b) Los ingresos bajos están dados por:
+
+- Mujer con escolaridad < 16
+- Hombre con escolaridad < 4, o
+- Hombre con escolaridad entre 4 y 11, pero menor a 31 años
+
+# 5. ¿Qué características tiene la región que genera los resultados que obtuvo?
+
+La Araucanía es una de las regiones más pobladas (proyección INE), siendo Temuco su capital regional y principal centro demográfico, económico y productivo de la región. La principal actividad económica es la agricultura, que representan la mayor superficie cultivada del país. También es un gran productor de la actividad ganadera y con oferta turística. Un valor referencial con efecto hacia los ingresos, es el Producto Interno Bruto. Al ser consultado para el año 2017 en la Base de Datos del Banco Central, muestra que la región posee un PIB de 4.688 miles de millones de pesos, cifra que está muy por debajo del promedio. Cifra que es coherente con la actividad económica de ña región.
+
+Sin embargo, un exámen mas exhaustivo requeriría un análisis comparativo con otras regiones.
+
+# 6. Explicación del modelo logístico y sus resultados
+
+Para explicar el fenómeno con un modelo logístico, la ecuación debe ser de la forma:
+
+$Ingresos=β0+β1Edad+β2Sexo+β3Escolaridad+ϵ$
+
+Esto ocurre porque en ambos casos (Ingresos Altos e Ingresos Bajos), la variable nacimiento no es significativa: Se acepta
+
+$H0:βnac=0$
+
+Esto se aprecia en lo siguiente:
+
+````{r}
+#Modelo de Ingresos Altos
+m.log_alt <- glm(formula = eqs.ing_alt[[1]][4], 
+    family = binomial(link = "logit"), 
+    data = training)
+
+tidy(m.log_alt) %>%
+  kable() %>%
+  kable_paper()
+````
+
+````{r}
+#Modelo de Ingresos Altos
+m.log_baj <- glm(formula = eqs.ing_baj[[1]][4], 
+    family = binomial(link = "logit"), 
+    data = training)
+
+tidy(m.log_baj) %>%
+  kable() %>%
+  kable_paper()
+````
+
+Ahora aplicando la formulación antes mencionada, obtenemos lo siguiente:
+
+````{r}
+#Modelo de Ingresos Altos
+m.log_alt <- glm(formula = ing_alt ~ edad + sexo + esc, 
+    family = binomial(link = "logit"), 
+    data = training)
+
+tidy(m.log_alt) %>%
+  kable() %>%
+  kable_paper()
+````
+
+`````{r}
+#Modelo de Ingresos Altos
+m.log_baj <- glm(formula = ing_baj ~ edad + sexo + esc, 
+    family = binomial(link = "logit"), 
+    data = training)
+
+tidy(m.log_baj) %>%
+  kable() %>%
+  kable_paper()
+````
+
+Aplicamos ahora nuestro modelo para los datos de testeo:
+
+````{r}
+#Ingresos Altos
+log.ing_alt <- predict(m.log_alt, testing,  type = "response")
+pred.class.ing_alt <- ifelse(log.ing_alt > .5, 1, 0)
+
+p.ing_alt <- tibble(test_sample.baj = testing$ing_alt, 
+                    pred.class.ing_alt) %>%
+  mutate(test_sample.baj = as.numeric(test_sample.baj)-1)
+
+p.ing_alt %>%
+  kable() %>%
+  kable_paper(full_width = F) %>%
+  scroll_box(height = "400px")
+````
+
+````{r}
+#Ingresos Bajos
+log.ing_baj <- predict(m.log_baj, testing,  type = "response")
+pred.class.ing_baj <- ifelse(log.ing_baj > .5, 1, 0)
+
+p.ing_baj <- tibble(test_sample.baj = testing$ing_baj, 
+                    pred.class.ing_baj) %>%
+  mutate(test_sample.baj = as.numeric(test_sample.baj)-1)
+
+p.ing_baj %>%
+  kable() %>%
+  kable_paper(full_width = F) %>%
+  scroll_box(height = "400px")
+````
+
+# 7. Explicación y análisis de qué método logró la mejor clasificación.
+
+Necesitamos ahora evaluar que modelo es el mejor, para ello, ocuparemos la función de comparación ocupada en el punto 2.d (m.choice).
+
+Para los ingresos altos
+
+````{r}
+if((m.choice(m.ing_alt, 2) - m.choice(p.ing_alt, 2)) == 0){
+  print(paste("Gini:", m.choice(m.ing_alt, 2)))
+  print(paste("Regresión Logística:", m.choice(p.ing_alt, 2)))
+  print("Ambos modelos son de igual precisión")
+} else  if ((m.choice(m.ing_alt, 2) - m.choice(p.ing_alt, 2)) > 0){
+  print(paste("Gini:", m.choice(m.ing_alt, 2)))
+  print(paste("Regresión Logística:", m.choice(p.ing_alt, 2)))
+  print("El mejor modelo es el logístico")
+} else {
+  print(paste("Gini:", m.choice(m.ing_alt, 2)))
+  print(paste("Regresión Logística:", m.choice(p.ing_alt, 2)))
+  print("El mejor modelo es de gini")
+}
+````
+
+Para los ingresos bajos
+
+````{r}
+if((m.choice(m.ing_baj, 2) - m.choice(p.ing_baj, 2)) == 0){
+  print(paste("Gini:", m.choice(m.ing_baj, 2)))
+  print(paste("Regresión Logística:", m.choice(p.ing_baj, 2)))
+  print("Ambos modelos son de igual precisión")
+} else  if ((m.choice(m.ing_baj, 2) - m.choice(p.ing_baj, 2)) > 0){
+  print(paste("Gini:", m.choice(m.ing_baj, 2)))
+  print(paste("Regresión Logística:", m.choice(p.ing_baj, 2)))
+  print("El mejor modelo es el logístico")
+} else {
+  print(paste("Gini:", m.choice(m.ing_baj, 2)))
+  print(paste("Regresión Logística:", m.choice(p.ing_baj, 2)))
+  print("El mejor modelo es de gini")
+}
+````
+
+Como se observa, el método que genera una mejor clasificación de Ingresos tanto para los bajos como los altos, es la Regresión Logística. Esto se debe al proceso de limpieza de los datos y que las variables explicativas poseen una relación lineal con la variable de respuesta, descartando del modelo la variable de nacionalidad. Que como vimos anteriormente, esto mismo ocurrió en los árboles de decisión. Sin embargo, para una interpretación más clara de la relación entre variables, es mejor el uso de árboles de decisión.
+
+# Bibliografía

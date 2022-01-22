@@ -1,0 +1,253 @@
+---
+title: <center> Localización Óptima de Nuevos Supermercados </center>
+author: "Ariel Fuentes"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: TRUE
+    number_sections: FALSE
+    toc_float: FALSE 
+      # collapsed: false
+      # smooth_scroll: false
+    css: "../code/style.css"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(haven)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(kableExtra)
+library(broom)
+library(sf)
+library(tmap)
+library(tidymodels)
+library(readr)
+```
+
+```{r, echo=FALSE}
+htmltools::img(src = knitr::image_uri(file.path("../data/logo_geo_0.png")
+                                      ),
+               alt = 'logo',
+               style = 'position:absolute; top:0; right:0; padding:1px;',
+               width = "110px",
+               heigth = "110px")
+```
+
+El propósito de este trabajo es que para la localización óptima de supermercados se consideren los gastos que poseen las personas, y por tanto, los posibles compradores. Para ello, consideraremos la muestra que entrega la *Encuesta de Presupuesto Familiar*, la que debe ser Microsimulada para obtener los Gastos por concepto de compra en supermercados por cada Zona Censal.
+
+# 1. Datos
+
+````{r}
+BASE_PERSONAS_VIII_EPF <- read_sav("../data/Encuesta Presupuesto Familiar 2017/Encuesta Presupuesto Familiar 2017/BASE_PERSONAS_VIII_EPF.sav")
+BASE_GASTOS_VIII_EPF <- read_sav("../data/Encuesta Presupuesto Familiar 2017/Encuesta Presupuesto Familiar 2017/BASE_GASTOS_VIII_EPF.sav")
+CCIF_VIII_EPF <- read_sav("../data/Encuesta Presupuesto Familiar 2017/Encuesta Presupuesto Familiar 2017/CCIF_VIII_EPF.sav")
+````
+
+# 2. Agrupación Gastos
+
+Para obtener los gastos con compras de supermercados, se relacionan la base de gastos con la base de las personas, donde esta última entrega la características de los hogares encuestados.
+
+Las glosas a considerar son:
+
+- Alimentos y Bebidas No Alchólicas
+- Bebidas Alcohólicas
+- Productos de Limpieza, y
+- Artículos de Higiene
+
+Se analizan los datos, estos presentan una distribución de probabilidad tipo poisson, y pueden ser normalizados con transformación logarítmica.
+
+````{r}
+G_f <- BASE_GASTOS_VIII_EPF %>%
+  filter(D == "01" | 
+           (D == "02" & !G %in% c("2", "3", "4")) | 
+           (D == "05" & G == "6" & C == "1" & (SC  %in% c("01", "02", "03"))) | 
+           (D == "12" & G == "1" & C == "3" & (SC  %in% c("02", "04")))) %>%
+  group_by(FAMILIA = FOLIO) %>%
+  summarise(G = sum(GASTO)) %>%
+  mutate(FAMILIA = replace(FAMILIA, FAMILIA == "", NA)) %>%
+  na.omit()
+
+ggplot(G_f, aes(x = G)) +
+  geom_histogram(aes(y=..density..), bins = 100, colour="black", fill="#EEEC6A") +
+  geom_density(fill="#0DD3DC", alpha = .6) +
+  xlim(0, 2.5e+06)
+
+ggplot(G_f, aes(x = log(G))) +
+  geom_histogram(aes(y=..density..), bins = 100, colour="black", fill="#EEEC6A") +
+  geom_density(fill="#0DD3DC", alpha = .6)
+````
+
+# 3. Obtención de Ingresos
+
+Se analizan los datos, estos presentan una distribución de probabilidad tipo poisson, y pueden ser normalizados con transformación logarítmica.
+
+````{r}
+I_f <- BASE_PERSONAS_VIII_EPF %>%
+  group_by(FAMILIA = FOLIO) %>%
+  summarise(I = sum(ING_TOTAL_HOG_HD))
+
+ggplot(I_f, aes(x = I)) +
+  geom_histogram(aes(y=..density..), bins = 100, colour="black", fill="#EEEC6A") +
+  geom_density(fill="#0DD3DC", alpha = .6) +
+  xlim(0, 5e+07)
+
+ggplot(I_f, aes(x = log(I))) +
+  geom_histogram(aes(y=..density..), bins = 100, colour="black", fill="#EEEC6A") +
+  geom_density(fill="#0DD3DC", alpha = .6)
+````
+
+# 4. Datos para Regresión
+
+Para obtener los Gastos, la ecuación de la regresión será de la siguiente forma:
+
+$G_F = \beta_0 + \beta_1*I_F  + \epsilon$
+
+````{r}
+GI_f <- left_join(G_f, I_f) %>%
+  left_join(BASE_PERSONAS_VIII_EPF %>% 
+              group_by(FAMILIA = FOLIO) %>% 
+              summarise(PERSONA = max(PERSONA))) %>%
+  mutate(G_p = G/PERSONA,
+         I_p = I/PERSONA) 
+
+ggplot(GI_f, aes(y = I_p)) +
+  geom_boxplot(width = .3, fill = "white") +
+  theme_minimal() +
+  ggtitle("Dispersión de Ingresos") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab("Ingresos per cápita")
+
+#Se descartan los supericos, es decir, los Ingresos per cápita superior a 3E07, como también los ingresos inferiores a 106,799, que corresponde a la línea de la extrema pobreza. 
+
+GI_f <- filter(GI_f, I_p < 3e+07 & I_p > 106799)
+
+ggplot(GI_f, aes(x= I_p, y = G_p)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+ggplot(GI_f, aes(x= log(I_p), y = log(G_p))) +
+  geom_point() +
+  geom_smooth(method = "lm")
+ggplot(GI_f, aes(x= log(I_p), y = G_p)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+````
+
+# 5. Modelo de Regresión
+
+Se aplicará el modelo a valores per cápita, es decir, Gastos e Ingresos divididos por la cantidad de integrantes en cada familia encuestada, los resultados de la regresión, no genera cambios significantivos si se hace por total Ingresos y Gasto por familia. Por otro lado, se verifica que la mejor Regresión, es aquella en la que se normaliza los Ingresos mediante una transformación logarítmica y sin intercepto.
+Referencialmente tenemos que el promedio de personas por hogar es de 3.2.
+
+````{r}
+set.seed(123)
+dt_split <- initial_split(GI_f, p = 3/4)
+dt_training <- training(dt_split)
+dt_testing <- testing(dt_split)
+#model
+lm_model <- linear_reg() %>% 
+  set_engine('lm') %>% 
+  set_mode('regression')
+lm_fit <- lm_model %>%
+  fit(G_p ~ log(I_p) - 1, 
+      data = dt_training)
+summary(lm_fit$fit)
+
+#prediction ----
+lm_train_pred <- predict(lm_fit, dt_training) %>%
+  bind_cols(dt_training)
+ggplot(aes(.pred), data = lm_train_pred) +
+  geom_histogram() +
+  ggtitle("Distribución de la Predicción en muestra de Entrenamiento")
+select(lm_train_pred, G_p, .pred) %>%
+  ggplot(aes(.pred, G_p)) +
+  geom_point() + 
+  geom_smooth(formula= y~x) +
+  ggtitle("Ajuste de la Predicción en muestra de Entrenamiento")
+
+lm_test_pred <- predict(lm_fit, dt_testing) %>%
+  bind_cols(dt_testing)
+ggplot(aes(.pred), data = lm_test_pred) +
+  geom_histogram() +
+  ggtitle("Distribución de la Predicción en muestra de Validación")
+select(lm_test_pred, G_p, .pred) %>%
+  ggplot(aes(.pred, G_p)) +
+  geom_point() + 
+  geom_smooth(formula= y~x) +
+  ggtitle("Ajuste de la Predicción en muestra de Validación")
+
+lm_alldata <- predict(lm_fit, select(GI_f, G_p, I_p)) %>%
+  bind_cols(GI_f) %>%
+  mutate(err = .pred - G_p)
+ggplot(aes(.pred), data = lm_alldata) +
+  geom_histogram() +
+  ggtitle("Distribución de la Predicción en todos los datos")
+select(lm_alldata, G_p, .pred) %>%
+  ggplot(aes(.pred, G_p)) +
+  geom_point() + 
+  geom_smooth(formula= y~x) +
+  ggtitle("Ajuste de la Predicción en todos los datos")
+ggplot(aes(err), data = lm_alldata) +
+  geom_histogram(aes(y=..density..)) + 
+  geom_density(fill="#0DD3DC", alpha = .6) +
+  ggtitle("Distribución del Error")
+````
+
+Si bien, el error está centrado en 0, este no se distribuye normal, por lo que nuestro modelo posee un pequeño sesgo donde nuestra predicción entregará valores más pequeños que la realidad. Cabe notar que si la transformación se hubiese aplicado al Gasto, tampoco se habría alcanzado una normalidad en los residuos; por lo que, valdría la pena explorar otro tipo de regresiones.
+
+# 6. Microsimulación
+
+En esta fase se procede a Microsimular el Gasto en Función de la compatibilización que tiene el Censo y la Casen en las variables de Educación, Edad y Sexo. Como en las zonas censales ya tenemos el Ingreso per cápita, a atrvés de la regresión, calcularemos el Gasto por compra en Supermercados.
+
+````{r}
+load("../microSimCasen2017_workspace_geomarketing.RData")
+GS_ZS <- st_as_sf(shape_gs) %>%
+  mutate(Gasto_perCap = lm_fit$fit$coefficients*log(INGRESO_PER_CAPITA))
+
+
+map <- tm_shape(GS_ZS) +
+  tm_polygons(col = "Gasto_perCap")
+
+tmap_leaflet(map)
+````
+
+# 7. Huff Ponderado
+
+Para obtener las mejores localizaciones de Supermercados, se calcula el Huff pero ponderado con el Gasto con bienes asociados a compras en Supermercado en cada Zona Censal, según la siguiente formulación:
+
+$G_{Pers/sup_{ij}} = (Pobl_{ZS_j}\frac{\frac{W_j^\beta}{D_{ij}^\alpha}}{\sum_{j=1}^{n}\frac{W_j^\beta}{D_{ij}^\alpha}})*G_{ZS}$
+
+$Donde: \\ Pobl_{ZS} = Población en Zona Censal\\ G_{Pers/sup} = Gasto\ de\ las\ personas\ en\ supermercado\\ W_j = Medida\ del\ atractivo\ de\ la\ tienda\\ D_{ij} = Distancia\ de\ lugar\ que\ vive\ el\ consumidor\ j\ a\ la\ tienda\ i\\ \alpha, \beta = Parámetros\ que\ regulan\ el\ efecto\ de\ la\ distancia\\ G_{ZS}= Gasto\ en\ Zona\ Censal\ en\ bienes\ asociados\ a\ compras\ en\ Supermercados$
+
+Como ya calculamos la cantidad de personas que van a supermercados en el trabajo II, utilizamos dicho listado para incorporar el Gasto.
+
+````{r, messages = F, warnings = F}
+loc_sp <- st_read("../../huff/output/loc_sp.gpkg")
+c_ini <-  st_read("../../huff/output/c_ini.gpkg")
+iter_esc <- st_join(loc_sp, GS_ZS, .predicate = st_intersects) %>%
+  mutate(GastoSup = personas_tienda*Gasto_perCap) %>%
+  group_by(iter) %>%
+  summarise(Prioridad = mean(GastoSup)) %>%
+  arrange(desc(Prioridad)) %>%
+  mutate(order = row_number()) %>%
+  filter(order == 1) %>%
+  st_drop_geometry() %>%
+  pull(iter) %>%
+  as.numeric()
+loc_esc <- filter(loc_sp, iter == iter_esc)
+
+map <- tm_basemap(leaflet::providers$Esri.WorldImagery) +
+  tm_basemap(leaflet::providers$OpenStreetMap) +
+  tm_shape(GS_ZS) +
+  tm_polygons(col = "Gasto_perCap") +
+  tm_shape(loc_esc) +
+  tm_dots(col = "black", legend.show = T) +
+  tm_shape(c_ini) +
+  tm_dots(col = "green", legend.show = T)
+
+tmap_leaflet(map)
+````
+
+Como se observa a partir del mapa dinámico, el mejor conjunto de localizaciones cambió (puntos negros), donde estos tienden acercarse más al centro. Podemos decir entonces, que la microsimulación del Gasto es un sello distintivo que realiza mejoras sustanciales a los resultados del modelo, y esto es lo que más le interesará a la empresa con necesidad de localización. Sin embargo, será interesante que en futuros desarrollos, se realicen actualizaciones de los Ingresos per cápita como parte de la regresión, en vez de aplicar un valor estático. Por otro lado, persiste el problema de localizar en lugares en los que no deberían, por consiguiente, faltaría una restricción adicional de localización que incorporar en este modelo.

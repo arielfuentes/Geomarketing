@@ -1,0 +1,255 @@
+---
+title: <center> Localización Óptima de Nuevos Supermercados </center>
+author: "Ariel Fuentes"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: TRUE
+    number_sections: FALSE
+    toc_float: FALSE 
+      # collapsed: false
+      # smooth_scroll: false
+    css: "../code/style.css"
+bibliography: ../code/biblio.bib
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("../huff-tools.R")
+library(dplyr)
+library(readr)
+library(sf)
+library(tmap)
+library(furrr)
+```
+
+```{r, echo=FALSE}
+htmltools::img(src = knitr::image_uri(file.path("../data/logo_geo_0.png")
+                                      ),
+               alt = 'logo',
+               style = 'position:absolute; top:0; right:0; padding:1px;',
+               width = "110px",
+               heigth = "110px")
+```
+
+
+En este informe se estudia mediante una simulación la localización de 5 nuevos supermercados de modo de maximizar el beneficio económico del mandante al encontrar las localizaciones que produzcan mayor número de ventas. Para cumplir con este propósito se simularán distintos puntos en el área de estudio para aplicar el modelo gravitacional HUFF. Cuya formulación es:
+
+$P_{ij} = \frac{\frac{W_j^\beta}{D_{ij}^\alpha}}{\sum_{j=1}^{n}\frac{W_j^\beta}{D_{ij}^\alpha}}$
+
+$Donde: \\ P_{ij} = Probabilidad\ que\ un\ consumidor\ compre\ en\ tienda\ j\\ W_j = Medida\ del\ atractivo\ de\ la\ tienda\\ D_{ij} = Distancia\ de\ lugar\ que\ vive\ el\ consumidor\ j\ a\ la\ tienda\ i\\ \alpha, \beta = Parámetros\ que\ regulan\ el\ efecto\ de\ la\ distancia$
+
+Para este caso en particular, los *W* serán el tamaño de la tienda y tendrá un valor fijo para los nuevos supermercados: $W_j = 1500$, los *W* de los supermercados actuales están simulados a partir de una regresión lineal simple. Las distancias *D*, serán distancias Euclidianas. 
+Los valores de $\alpha\ y\ \beta$ que se aplicarán, serán de 3 y 1 respectivamente. 
+
+Para entregar los resultados, se generarán 50 simulaciones y se aplicará un proceso de computación paralela para mejorar la velocidad de procesamiento.
+
+## 1. Datos de entrada
+
+````{r, warning = F, message = F}
+stgo <- st_read("../data/shape_disuelto.geojson")
+#zonas censales
+stgo_zs <- st_read("../data/shape_gs_urbano.geojson")
+supermercados <- read_csv("../data/supermercados.csv") %>%
+  #transformación a datos espaciales
+  st_as_sf(coords = c("Longitud", "Latitud"), crs = 4326)
+
+summary(supermercados)
+````
+
+La localización de los supermercados es la siguiente:
+
+````{r, warning = F, message = F, out.width = '100%'}
+map <- tm_basemap(leaflet::providers$OpenStreetMap) +
+  tm_basemap(leaflet::providers$Esri.WorldImagery) +
+  tm_shape(stgo) +
+  tm_polygons(col = "gray", alpha = .2) +
+  tm_shape(supermercados) +
+  tm_symbols(col = "CANT_PER", 
+             size = .2, alpha = .5,
+             popup.vars = c("Nombre", "CANT_PER", "densidad_super")) 
+
+tmap_leaflet(map)
+````
+
+A continuación se simula el tamaño de los supermercados:
+
+````{r}
+#rango
+df_dens <- tibble(tam = c(400, 3000), dens = c(min(supermercados$densidad_super),
+                                               max(supermercados$densidad_super)))
+#regresión lineal
+lm_df=lm(tam ~ dens, df_dens)
+# generación del componente estocástico
+res_sim=rnorm(553,0,300)
+#simulación del área
+area_sim=abs(lm_df$coefficients[1]+lm_df$coefficients[2]*supermercados$densidad_super+res_sim)
+````
+
+Localización de 5 nuevos supermercados:
+
+````{r, message = F, warning = F}
+#Número de muestra
+n = 5
+#Número de iteraciones
+n_iter = 15
+#Área supermercado
+A = 1500
+loc <- function(n, A, seed){
+  #Muestra geolocalizada
+set.seed(seed)
+muestra <- st_sample(stgo, size = n, type = "random") %>%
+  st_as_sf() %>%
+  st_coordinates() %>% 
+  as_tibble() %>% 
+  mutate(area = A)
+#Observaciones supermercado simulado
+super_obs <- st_coordinates(supermercados) %>% 
+  as_tibble() %>%
+  mutate(area = area_sim)
+# Se incorporan los supermercados de la muestra al conjunto inicial
+tabla_atractivo <- bind_rows(super_obs, muestra) %>% 
+  mutate(ID_tienda = row_number()) %>% 
+  st_as_sf(coords = c("X", "Y"), crs = 4326)
+#Cálculo de distancias de centroides de zonas censales a supermercados
+distancia <- as.vector(st_distance(st_centroid(st_transform(stgo_zs, 32719)), 
+                                   st_transform(st_as_sf(tabla_atractivo), 32719), 
+                                   which = "Euclidean"))
+#Tabla input para Huff: Contiene la distancia Euclideana entre cada zona censal y cada supermercado 
+tabla_Huff_input <- tibble(ID_tienda = rep(tabla_atractivo$ID_tienda, each = nrow(stgo_zs)),
+                  ID_zc = rep(stgo_zs$GEOCODIGO, times = nrow(tabla_atractivo)),
+                  distancia) %>%
+  left_join(select(tabla_atractivo, -geometry)) %>%
+  mutate(alpha = rep(3,nrow(.)),
+         beta = rep(1,nrow(.)))
+#Cálculo de Probabilidades
+huff_prob <- huff_basic(destinations_name = tabla_Huff_input$ID_tienda, 
+                        destinations_attractiveness = tabla_Huff_input$area,
+                        origins_name = tabla_Huff_input$ID_zc, 
+                        distance = tabla_Huff_input$distancia, 
+                        alpha = tabla_Huff_input$alpha,
+                        beta = tabla_Huff_input$beta) %>%
+  rename(GEOCODIGO = origins_name, ID_tienda = destinations_name)
+#Clientes totales por supermercado
+clientes <- select(st_drop_geometry(stgo_zs), GEOCODIGO, CANT_PER) %>%
+  as_tibble() %>%
+  left_join(select(huff_prob, GEOCODIGO, ID_tienda, huff_probability)) %>% 
+  mutate(personas_tienda = CANT_PER*huff_probability) %>%
+  group_by(ID_tienda) %>% 
+  summarise(personas_tienda = sum(personas_tienda)) %>% 
+  filter(ID_tienda > nrow(supermercados)) %>% 
+  left_join(tabla_atractivo) %>% 
+  st_as_sf()
+return(clientes)
+}
+````
+
+````{r, message = F, warning = F}
+set.seed(23)
+seed_lst <- sample(1:10000, 50, replace=FALSE)
+future::plan(strategy = multisession, workers = 4)
+options <- furrr_options(seed = 123)
+
+loc_sp <- seed_lst %>%
+  future_imap(~mutate(loc(n, A, seed = .x), iter = .y))
+
+loc_sp <- bind_rows(loc_sp)
+st_write(loc_sp, "../output/loc_sp.gpkg")
+````
+
+# 2. Seleccionar mejor set de 5 nuevos supermercados de acuerdo a mejor promedio de personas que comprarían en estos.
+
+````{r, warning = F, message = F, out.width = '100%'}
+prioridad <- loc_sp %>% 
+  st_drop_geometry() %>% 
+  group_by(iter) %>% 
+  summarise(pers_promedio = mean(personas_tienda)) %>% 
+  arrange(pers_promedio) %>%
+  mutate(prioridad = row_number())
+
+#El conjunto inicial de localizaciones sería:
+c_ini <- loc_sp %>% 
+  left_join(prioridad) %>%
+  filter(prioridad == 5)
+
+# st_write(c_ini, "../output/c_ini.gpkg")
+#Se verifica que sean localizaciones factibles
+
+map <- tm_basemap(leaflet::providers$OpenStreetMap) +
+  tm_basemap(leaflet::providers$Esri.WorldImagery) +
+  tm_shape(stgo) +
+  tm_polygons(col = "gray", alpha = .2) +
+  tm_shape(c_ini) +
+  tm_dots(col = "personas_tienda", 
+             size = .2, alpha = .5) 
+
+tmap_leaflet(map)
+````
+
+El mapa de las localizaciones elegidas, es el siguiente:
+
+````{r, warning = F, message = F}
+tm_shape(stgo) +
+  tm_grid(lwd = 2, col = "white") +
+  tm_polygons(col = "gray") +
+  tm_shape(supermercados) +
+  tm_dots(col = "blue")+
+  tm_shape(c_ini) +
+  tm_dots(col = "red", shape = 7, size = .3) +
+  tm_layout(bg.color = "#DAF7A6", main.title = "Localización de Supermercados", main.title.position = "center") +
+  tm_compass(position = c("right", "top"), type = "4star", size = 2) +
+  tm_scale_bar(position = c("right", "bottom")) 
+````
+
+De las 50 simulaciones, se estableció una escala de prioridad en base a las personas promedio de cada simulación. Después de la inspección territorial utilizando mapas base (XYZ Tiles), se escogió  el quinto paquete prioritario. Del resultado obtenido habría que realizar una pequeña intervención respecto a la localización geográfica, donde se podrían mover hacia las plazas próximas que están a unos cuantos metros, para no tener que negociar la compra de viviendas. Esta medida no afectaría mayormente los resultados.  La ubicación más inusual, es la que lo posiciona en el Mall Plaza Tobalaba donde ya hay un supermercado, sin embargo, a un par de metros hay un terreno sin ocupar, que serviría como competencia directo del supermercado Líder.    
+
+# 3. Combinación manual de mejor set 
+
+````{r, message = F, warning = F, out.width = '100%'}
+c_manual <- loc_sp %>% 
+  st_drop_geometry %>% 
+  group_by(iter) %>% 
+  summarise(top = max(personas_tienda)) %>% 
+  arrange(desc(top)) %>%
+  left_join(rename(loc_sp, top = personas_tienda)) %>%
+  mutate(prioridad = row_number()) %>%
+  filter(prioridad <= 5) %>%
+  st_as_sf()
+
+# st_write(c_manual, "../output/c_manual.gpkg")
+#Se verifica que sean localizaciones factibles
+
+map <- tm_basemap(leaflet::providers$OpenStreetMap) +
+  tm_basemap(leaflet::providers$Esri.WorldImagery) +
+  tm_shape(stgo) +
+  tm_polygons(col = "gray", alpha = .2) +
+  tm_shape(c_manual) +
+  tm_dots(col = "top", 
+             size = .2, alpha = .5) 
+
+tmap_leaflet(map)
+````
+
+El mapa de las localizaciones elegidas, es el siguiente:
+
+````{r, warning = F, message = F}
+tm_shape(stgo) +
+  tm_grid(lwd = 2, col = "white") +
+  tm_polygons(col = "gray") +
+  tm_shape(supermercados) +
+  tm_dots(col = "blue")+
+  tm_shape(c_manual) +
+  tm_dots(col = "red", shape = 7, size = .3) +
+  tm_layout(bg.color = "#DAF7A6", main.title = "Localización de Supermercados", main.title.position = "center") +
+  tm_compass(position = c("right", "top"), type = "4star", size = 2) +
+  tm_scale_bar(position = c("right", "bottom")) 
+
+````
+
+La localización de los 5 mejores parece razonable, dado que los ubica en el centro de ciudad y es donde más concentración de personas hay.
+
+El modelo de Huff muestra ser razonable en términos de análisis exploratorio para identificar los sectores de la ciudad en los cuales afinar la búsqueda de terrenos, sobretodo si el proceso permite obtener grandes muestras. Sin embargo, en muchas ocasiones parecieran ser ubicaciones infactibles de usar ya sea por ser zonas muy residenciales(villas/poblaciones), oficinas o lugares de esparcimiento que complicarían el proceso de compra de los terrenos; por otro lado, el hecho que $\alpha\ y\ \beta$ no sean calibrables es su mayor debilidad porque será muy difícil saber cual sería la relación real entre estos e incluso si estos podrían variar en el espacio. 
+Suena como mejor alternativa (incluso puede ser complementaria), con base en opciones de terreno identificadas, crear un modelo de optimización matemática para determinar el mejor subconjunto. 
+
+Como ejercicio posterior, se podrían probar simulaciones con áreas variables para los nuevos supermercados y distintos $\alpha, \beta$, además de cartografiar los lugares infactibles de localizar, para que estos no sean incluidos en la muestra del área de estudio. 
